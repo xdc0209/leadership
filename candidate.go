@@ -1,10 +1,11 @@
 package leadership
 
 import (
+	"context"
 	"sync"
 	"time"
 
-	"github.com/docker/libkv/store"
+	"github.com/kvtools/valkeyrie/store"
 )
 
 const (
@@ -18,7 +19,7 @@ type Candidate struct {
 	node   string
 
 	electedCh chan bool
-	lock      sync.Mutex
+	lock      sync.RWMutex
 	lockTTL   time.Duration
 	leader    bool
 	stopCh    chan struct{}
@@ -43,6 +44,8 @@ func NewCandidate(client store.Store, key, node string, ttl time.Duration) *Cand
 
 // IsLeader returns true if the candidate is currently a leader.
 func (c *Candidate) IsLeader() bool {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 	return c.leader
 }
 
@@ -52,11 +55,11 @@ func (c *Candidate) IsLeader() bool {
 // ElectedCh is used to get a channel which delivers signals on
 // acquiring or losing leadership. It sends true if we become
 // the leader, and false if we lose it.
-func (c *Candidate) RunForElection() (<-chan bool, <-chan error) {
+func (c *Candidate) RunForElection(ctx context.Context) (<-chan bool, <-chan error) {
 	c.electedCh = make(chan bool)
 	c.errCh = make(chan error)
 
-	go c.campaign()
+	go c.campaign(ctx)
 
 	return c.electedCh, c.errCh
 }
@@ -87,7 +90,7 @@ func (c *Candidate) update(status bool) {
 	c.electedCh <- status
 }
 
-func (c *Candidate) initLock() (store.Locker, error) {
+func (c *Candidate) initLock(ctx context.Context) (store.Locker, error) {
 	// Give up on the lock session if
 	// we recovered from a store failure
 	if c.stopRenew != nil {
@@ -105,11 +108,11 @@ func (c *Candidate) initLock() (store.Locker, error) {
 	lockOpts.RenewLock = make(chan struct{})
 	c.stopRenew = lockOpts.RenewLock
 
-	lock, err := c.client.NewLock(c.key, lockOpts)
+	lock, err := c.client.NewLock(ctx, c.key, lockOpts)
 	return lock, err
 }
 
-func (c *Candidate) campaign() {
+func (c *Candidate) campaign(ctx context.Context) {
 	defer close(c.electedCh)
 	defer close(c.errCh)
 
@@ -117,13 +120,13 @@ func (c *Candidate) campaign() {
 		// Start as a follower.
 		c.update(false)
 
-		lock, err := c.initLock()
+		lock, err := c.initLock(ctx)
 		if err != nil {
 			c.errCh <- err
 			return
 		}
 
-		lostCh, err := lock.Lock(nil)
+		lostCh, err := lock.Lock(ctx)
 		if err != nil {
 			c.errCh <- err
 			return
@@ -136,11 +139,11 @@ func (c *Candidate) campaign() {
 		case <-c.resignCh:
 			// We were asked to resign, give up the lock and go back
 			// campaigning.
-			lock.Unlock()
+			_ = lock.Unlock(ctx)
 		case <-c.stopCh:
 			// Give up the leadership and quit.
 			if c.leader {
-				lock.Unlock()
+				_ = lock.Unlock(ctx)
 			}
 			return
 		case <-lostCh:
