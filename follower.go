@@ -1,9 +1,10 @@
 package leadership
 
 import (
+	"context"
 	"errors"
 
-	"github.com/docker/libkv/store"
+	"github.com/kvtools/valkeyrie/store"
 )
 
 // Follower can follow an election in real-time and push notifications whenever
@@ -33,11 +34,11 @@ func (f *Follower) Leader() string {
 }
 
 // FollowElection starts monitoring the election.
-func (f *Follower) FollowElection() (<-chan string, <-chan error) {
+func (f *Follower) FollowElection(ctx context.Context) (<-chan string, <-chan error) {
 	f.leaderCh = make(chan string)
 	f.errCh = make(chan error)
 
-	go f.follow()
+	go f.follow(ctx)
 
 	return f.leaderCh, f.errCh
 }
@@ -47,11 +48,11 @@ func (f *Follower) Stop() {
 	close(f.stopCh)
 }
 
-func (f *Follower) follow() {
+func (f *Follower) follow(ctx context.Context) {
 	defer close(f.leaderCh)
 	defer close(f.errCh)
 
-	ch, err := f.client.Watch(f.key, f.stopCh)
+	ch, err := f.client.Watch(ctx, f.key, nil)
 	if err != nil {
 		f.errCh <- err
 	}
